@@ -1,11 +1,11 @@
 package daemon
 
 import (
+	"database/sql"
 	"sync"
 
 	"github.com/giammarcoferranti/deja/internal/scorer"
 	"github.com/giammarcoferranti/deja/internal/store"
-	"gorm.io/gorm"
 )
 
 // defaultShowEmpty is the in-memory default for whether the daemon suggests on
@@ -20,7 +20,7 @@ const defaultShowEmpty = true
 // Reads are cheap and concurrent; writes (from Record) are brief and rare.
 type State struct {
 	mu        sync.RWMutex
-	db        *gorm.DB
+	db        *sql.DB
 	stats     []store.CommandStat       // every command_stats row, most-used first
 	seqByPrev map[string]map[string]int // prev → next → count, filled lazily
 	dirCounts map[string]map[string]int // cmd  → dir  → count
@@ -38,7 +38,7 @@ type State struct {
 // the keystroke path free of SQLite entirely — which is the trade that matters.
 // The suggestion path that *cannot* afford it is fallbackSuggest, and that one
 // scopes the lookup to a shortlist instead (see cmd/deja/query.go).
-func Load(db *gorm.DB) (*State, error) {
+func Load(db *sql.DB) (*State, error) {
 	stats, err := store.GetCommandStats(db)
 	if err != nil {
 		return nil, err
@@ -61,6 +61,25 @@ func Load(db *gorm.DB) (*State, error) {
 		fuzzy:     scorer.FuzzyDefault,
 		showEmpty: defaultShowEmpty,
 	}, nil
+}
+
+// CheckpointWAL moves the write-ahead log into the database and truncates it.
+//
+// SQLite's automatic checkpointing keeps the WAL from growing without bound,
+// but it never makes the file smaller: a PASSIVE checkpoint copies pages into
+// the database and then restarts the WAL from offset zero, reusing the space.
+// So the file keeps whatever high-water mark it ever reached — after `deja
+// import` writes a whole shell history in one transaction, that can be tens of
+// megabytes sitting on disk for the lifetime of the database. One observed
+// install held a 28MB WAL against a 35MB database, with zero live frames in it.
+//
+// TRUNCATE is the only checkpoint mode that shrinks the file. It is also the
+// one that can be refused: it needs every reader to be off the old snapshot,
+// and reports busy rather than waiting. That is fine here — this runs on a
+// timer, so a refusal just means the next tick tries again.
+func (s *State) CheckpointWAL() error {
+	_, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	return err
 }
 
 // SetFuzzy updates the strictness preset used by Suggest.
