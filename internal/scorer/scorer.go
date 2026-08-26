@@ -208,6 +208,90 @@ type candidateSource []store.CommandStat
 func (c candidateSource) String(i int) string { return c[i].Command }
 func (c candidateSource) Len() int            { return len(c) }
 
+// anchor restricts which candidates may be suggested when the buffer is itself
+// something the user has run. Fuzzy matching treats the typed text as a
+// subsequence, so `cd ` matches `claude --resume` (c…d…␣, every gap inside even
+// the smart cap) and a strong enough frecency and directory signal lets it win
+// the prompt. Suggesting an unrelated command when the typed one can simply be
+// continued is never what was meant.
+//
+// The zero value allows every candidate. That is the pre-existing behaviour,
+// and what a buffer like `gco` — a subsequence of `git checkout`, not a command
+// in its own right — still gets.
+type anchor struct {
+	buffer string // what was typed; never eligible itself (see allows)
+	prefix string // tier 1: candidate must start with this and continue past it
+	head   string // tier 2: candidate's first word must equal this
+}
+
+// allows reports whether cmd survives the anchor.
+//
+// A candidate identical to the buffer is always rejected: its ghost text is the
+// empty string, so letting it win would spend the suggestion slot on nothing.
+// Under a prefix anchor the length test covers that case, since prefix is the
+// buffer.
+func (a anchor) allows(cmd string) bool {
+	switch {
+	case a.prefix != "":
+		return len(cmd) > len(a.prefix) && strings.HasPrefix(cmd, a.prefix)
+	case a.head != "":
+		return cmd != a.buffer && commandWord(cmd) == a.head
+	default:
+		return true
+	}
+}
+
+// newAnchor picks the tightest anchor the candidate set supports:
+//
+//  1. a literal prefix, when some recorded command continues what was typed.
+//     `ls` anchors `ls -la` and `lsof -i` alike — both continue the text, and
+//     nothing about the typed characters says which word the user is finishing.
+//  2. failing that, the typed command word, when some *other* command shares it.
+//     This is what survives a typo (`git ceckout` → `git checkout …`) or a case
+//     difference the byte-exact prefix test in tier 1 misses (`cd d` →
+//     `cd Devel/…`), because the fuzzy library matches case-insensitively.
+//  3. failing both, no anchor: the typed text is not a command this history has
+//     seen, so fuzzy expansion across everything is exactly what it is for.
+//
+// Tier 2 ignores a candidate identical to the buffer. Anchoring on it alone
+// would leave the buffer as the only eligible candidate, and a suggestion equal
+// to what is already typed renders no ghost at all — turning `gco`, for someone
+// who has an alias by that name, from a useful expansion into silence.
+//
+// One pass over the candidates, string comparisons only, next to the
+// subsequence scan fuzzy.FindFromNoSort already runs over the same slice.
+func newAnchor(candidates []store.CommandStat, buffer string) anchor {
+	if buffer == "" {
+		return anchor{}
+	}
+
+	head := commandWord(buffer)
+	headKnown := false
+
+	for _, c := range candidates {
+		if len(c.Command) > len(buffer) && strings.HasPrefix(c.Command, buffer) {
+			return anchor{buffer: buffer, prefix: buffer}
+		}
+		if !headKnown && head != "" && c.Command != buffer && commandWord(c.Command) == head {
+			headKnown = true
+		}
+	}
+
+	if headKnown {
+		return anchor{buffer: buffer, head: head}
+	}
+	return anchor{}
+}
+
+// commandWord is the leading token of a command line: everything before the
+// first space. A substring of the input, so no allocation.
+func commandWord(s string) string {
+	if i := strings.IndexByte(s, ' '); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
 // computeFuzzy returns the per-candidate fuzzy score and how many candidates
 // scored above zero, so the caller can size its result slice to the survivors
 // rather than to the whole history.
@@ -236,11 +320,20 @@ func computeFuzzy(candidates []store.CommandStat, buffer string, fuzziness Fuzzy
 	gapCap := maxGap(fuzziness)
 	filterByGap := len(buffer) > 1
 
+	// Anchoring runs before the min-max normalisation below so that anchored-out
+	// commands score zero and never enter the ranking at all — not as a
+	// suggestion, not as an alternative, and not in the fallback's affinity
+	// shortlist.
+	anch := newAnchor(candidates, buffer)
+
 	matched := make([]bool, len(candidates))
 	raw := make([]int, len(candidates))
 	first := true
 	var min, max int
 	for _, m := range matches {
+		if !anch.allows(candidates[m.Index].Command) {
+			continue
+		}
 		if filterByGap && maxConsecutiveGap(m.MatchedIndexes) > gapCap {
 			continue
 		}
@@ -259,7 +352,7 @@ func computeFuzzy(candidates []store.CommandStat, buffer string, fuzziness Fuzzy
 		}
 	}
 	if first {
-		// Every match was filtered out by the gap cap.
+		// Every match was filtered out by the anchor or the gap cap.
 		return scores, 0
 	}
 

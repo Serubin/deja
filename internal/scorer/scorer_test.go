@@ -390,6 +390,150 @@ func TestRank_GapFilter(t *testing.T) {
 	})
 }
 
+// TestRank_Anchor pins the rule that a buffer which is itself something the
+// user has run never gets an unrelated command suggested back. Fuzzy matching
+// alone happily reads `cd ` as a subsequence of `claude --resume`, and a
+// command run often enough drowns out every real continuation.
+func TestRank_Anchor(t *testing.T) {
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+
+	hasCmd := func(rs []Result, cmd string) bool {
+		for _, r := range rs {
+			if r.Command == cmd {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("literal prefix drops the fuzzy interloper", func(t *testing.T) {
+		// The reported case: `claude --resume` is c…d…␣ and heavily used, so
+		// without an anchor it outranks every `cd …` in the history.
+		candidates := []store.CommandStat{
+			{Command: "claude --resume", Count: 500, LastUsed: now},
+			{Command: "cd Devel/personal/deja", Count: 5, LastUsed: now.Add(-72 * time.Hour)},
+		}
+
+		got := Rank(candidates, "cd ", "", "", nil, nil, now, FuzzyLoose)
+
+		if len(got) != 1 || got[0].Command != "cd Devel/personal/deja" {
+			t.Fatalf("want only the cd continuation, got %+v", got)
+		}
+	})
+
+	t.Run("prefix anchor excludes the buffer itself", func(t *testing.T) {
+		// A suggestion equal to the buffer paints no ghost text, so it must not
+		// take the slot from a real continuation however often it was run.
+		candidates := []store.CommandStat{
+			{Command: "cd", Count: 900, LastUsed: now},
+			{Command: "cd Devel/personal/deja", Count: 5, LastUsed: now.Add(-72 * time.Hour)},
+		}
+
+		got := Rank(candidates, "cd", "", "", nil, nil, now, FuzzySmart)
+
+		if len(got) != 1 || got[0].Command != "cd Devel/personal/deja" {
+			t.Fatalf("want only the cd continuation, got %+v", got)
+		}
+	})
+
+	t.Run("prefix anchor keeps a longer word that continues the text", func(t *testing.T) {
+		// Nothing in `ls` says which word is being finished, so both stay.
+		candidates := []store.CommandStat{
+			{Command: "ls -la", Count: 40, LastUsed: now},
+			{Command: "lsof -i", Count: 3, LastUsed: now},
+			{Command: "claude --resume", Count: 500, LastUsed: now},
+		}
+
+		got := Rank(candidates, "ls", "", "", nil, nil, now, FuzzySmart)
+
+		for _, want := range []string{"ls -la", "lsof -i"} {
+			if !hasCmd(got, want) {
+				t.Errorf("expected %q in results, got %+v", want, got)
+			}
+		}
+		if hasCmd(got, "claude --resume") {
+			t.Errorf("did not expect the interloper, got %+v", got)
+		}
+	})
+
+	t.Run("command word anchors a typo to its own family", func(t *testing.T) {
+		// No candidate starts with `git ceckout`, so tier 1 cannot fire — but
+		// `git` is a command word this history knows, and `gitk --checkout` is
+		// a different command.
+		candidates := []store.CommandStat{
+			{Command: "gitk --checkout", Count: 200, LastUsed: now},
+			{Command: "git checkout main", Count: 4, LastUsed: now.Add(-48 * time.Hour)},
+			{Command: "git push", Count: 50, LastUsed: now},
+		}
+
+		got := Rank(candidates, "git ceckout", "", "", nil, nil, now, FuzzySmart)
+
+		if !hasCmd(got, "git checkout main") {
+			t.Errorf("expected the in-family match, got %+v", got)
+		}
+		if hasCmd(got, "gitk --checkout") {
+			t.Errorf("did not expect a different command word, got %+v", got)
+		}
+	})
+
+	t.Run("command word anchor covers a case difference tier 1 misses", func(t *testing.T) {
+		// The fuzzy library matches case-insensitively; the prefix test does
+		// not, so `cd d` reaches `cd Devel/…` only through the word anchor.
+		candidates := []store.CommandStat{
+			{Command: "codex --dangerous", Count: 300, LastUsed: now},
+			{Command: "cd Devel/personal", Count: 5, LastUsed: now.Add(-72 * time.Hour)},
+		}
+
+		got := Rank(candidates, "cd d", "", "", nil, nil, now, FuzzySmart)
+
+		if len(got) != 1 || got[0].Command != "cd Devel/personal" {
+			t.Fatalf("want only the cd continuation, got %+v", got)
+		}
+	})
+
+	t.Run("anchored buffer with no in-family match suggests nothing", func(t *testing.T) {
+		candidates := []store.CommandStat{
+			{Command: "git push", Count: 50, LastUsed: now},
+			{Command: "claude --resume", Count: 500, LastUsed: now},
+		}
+
+		got := Rank(candidates, "git zzz", "", "", nil, nil, now, FuzzySmart)
+
+		if len(got) != 0 {
+			t.Errorf("want no suggestion rather than a fuzzy stand-in, got %+v", got)
+		}
+	})
+
+	t.Run("an abbreviation still expands even when recorded itself", func(t *testing.T) {
+		// `gco` as a recorded alias must not anchor: it is the only candidate
+		// with that command word, and it equals the buffer, so anchoring on it
+		// would turn the canonical expansion into an empty ghost.
+		candidates := []store.CommandStat{
+			{Command: "gco", Count: 20, LastUsed: now},
+			{Command: "git checkout main", Count: 5, LastUsed: now},
+		}
+
+		got := Rank(candidates, "gco", "", "", nil, nil, now, FuzzySmart)
+
+		if !hasCmd(got, "git checkout main") {
+			t.Errorf("expected the fuzzy expansion, got %+v", got)
+		}
+	})
+
+	t.Run("empty buffer is never anchored", func(t *testing.T) {
+		candidates := []store.CommandStat{
+			{Command: "cd Devel/personal", Count: 5, LastUsed: now},
+			{Command: "claude --resume", Count: 500, LastUsed: now},
+		}
+
+		got := Rank(candidates, "", "", "", nil, nil, now, FuzzySmart)
+
+		if len(got) != len(candidates) {
+			t.Errorf("want all %d candidates, got %+v", len(candidates), got)
+		}
+	})
+}
+
 func findResult(rs []Result, cmd string) *Result {
 	for i := range rs {
 		if rs[i].Command == cmd {
