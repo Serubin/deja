@@ -1,0 +1,98 @@
+name: canary-release
+
+# Continuous releases for the fork's `canary` branch: every commit that passes
+# the test suite is tagged, published as a prerelease in Serubin/deja, and
+# pushed to the `deja` formula in Serubin/homebrew-formula. See
+# .goreleaser.canary.yaml. This file lives on `canary` only — `main` stays a
+# mirror of upstream, which owns the `v*` release train.
+
+on:
+  push:
+    branches: [canary]
+  workflow_dispatch:
+
+# One canary release at a time: GoReleaser commits to the tap, and two
+# concurrent runs would race on that push. Runs are never cancelled — an
+# interrupted one may already have tagged or published.
+concurrency:
+  group: canary-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    # Inert anywhere but the fork: this branch's files can reach upstream via a
+    # PR, and upstream must keep releasing only from its own tags.
+    if: github.repository == 'Serubin/deja'
+    uses: ./.github/workflows/test.yml
+
+  goreleaser:
+    needs: test
+    if: github.repository == 'Serubin/deja'
+    runs-on: ubuntu-latest
+    steps:
+      # Fail before anything is tagged or published: GoReleaser only resolves
+      # the tap token during its publish phase, so without this a missing secret
+      # would leave a release behind with a stale formula pointing at the
+      # previous one.
+      - name: Require tap token
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          if [ -z "${TAP_GITHUB_TOKEN}" ]; then
+            echo "::error::TAP_GITHUB_TOKEN is unset. Create a fine-grained PAT with contents:write on Serubin/homebrew-formula and run: gh secret set TAP_GITHUB_TOKEN --repo Serubin/deja"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          # GoReleaser needs the full history and every tag to build a changelog.
+          fetch-depth: 0
+
+      - name: Compute canary version
+        id: version
+        run: |
+          set -euo pipefail
+          base="$(jq -er '."."' .release-please-manifest.json)"
+          # Patch-bump the last release so canary sorts between releases in both
+          # semver and Homebrew: 0.4.0 < 0.4.1-canary.N < 0.4.1. The base moves
+          # on its own as release-please bumps main and main merges into canary.
+          next="$(printf '%s' "$base" | awk -F. '{ printf "%d.%d.%d", $1, $2, $3 + 1 }')"
+          echo "tag=${next}-canary.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # No `v` prefix, deliberately: upstream's release.yml triggers on `v*`
+          # and publishes to Giammarco-Ferranti/deja, which the fork cannot
+          # write to. GoReleaser treats the `v` as optional.
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "${TAG} already exists — re-running a previous attempt."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG}" -m "canary ${TAG}"
+            git push origin "refs/tags/${TAG}"
+          fi
+          echo "Releasing \`${TAG}\` from \`$(git rev-parse --short HEAD)\`." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Release via goreleaser-cross (Docker)
+        # Pinned rather than :latest so a toolchain or GoReleaser change cannot
+        # break canary without a visible commit here.
+        run: |
+          docker run --rm --privileged \
+            -v "$PWD":/src \
+            -w /src \
+            -e GITHUB_TOKEN \
+            -e TAP_GITHUB_TOKEN \
+            ghcr.io/goreleaser/goreleaser-cross:v1.26.5-v2.17.1 \
+            release --clean -f .goreleaser.canary.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Fine-grained PAT with contents:write on Serubin/homebrew-formula —
+          # GITHUB_TOKEN cannot reach another repository.
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}

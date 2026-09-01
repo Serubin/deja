@@ -1,0 +1,213 @@
+# Canary release config — this file lives on the `canary` branch only.
+#
+# `.goreleaser.yaml` is the upstream release train: a `v*` tag publishes to
+# Giammarco-Ferranti/deja and the giammarco-ferranti/homebrew-deja tap. This
+# file is the fork's continuous-release equivalent, driven by
+# .github/workflows/canary-release.yml: every commit on `canary` is tagged
+# `<next-patch>-canary.<run>` (no `v` prefix, so upstream's tag-triggered
+# workflow stays out of it) and published as a prerelease in Serubin/deja, then
+# the `deja` formula in Serubin/homebrew-formula is regenerated to point at
+# those binaries.
+#
+# `builds`, `archives`, and `checksum` are duplicated from `.goreleaser.yaml` on
+# purpose — GoReleaser OSS has no `includes:`. Keep them in sync so a canary
+# binary is built exactly like a release binary.
+version: 2
+
+project_name: deja
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: deja
+    main: ./cmd/deja
+    binary: deja
+    env:
+      - CGO_ENABLED=1
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    overrides:
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CC=o64-clang
+          - CXX=o64-clang++
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CC=oa64-clang
+          - CXX=oa64-clang++
+      - goos: linux
+        goarch: amd64
+        env:
+          - CC=x86_64-linux-gnu-gcc
+          - CXX=x86_64-linux-gnu-g++
+      - goos: linux
+        goarch: arm64
+        env:
+          - CC=aarch64-linux-gnu-gcc
+          - CXX=aarch64-linux-gnu-g++
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  sort: asc
+  # `github` compares two tags through the API; canary's previous tag is the
+  # previous canary build, so read the log directly instead.
+  use: git
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: Serubin
+    name: deja
+  draft: false
+  # Every canary build is a prerelease. Quoted because GoReleaser types this as
+  # a string ("true"/"false"/"auto").
+  prerelease: "true"
+  name_template: 'canary {{ .Version }}'
+  # Makes re-running a failed release attempt idempotent: the run number, and so
+  # the tag, is unchanged, and the artifacts are overwritten rather than
+  # colliding.
+  replace_existing_artifacts: true
+
+brews:
+  - name: deja
+    ids:
+      - default
+    repository:
+      owner: Serubin
+      name: homebrew-formula
+      token: '{{ .Env.TAP_GITHUB_TOKEN }}'
+    directory: Formula
+    homepage: https://github.com/Serubin/deja
+    # No trailing full stop: `brew style` flags it.
+    description: Predictive inline shell autosuggestions for zsh (canary builds)
+    license: MIT
+    commit_msg_template: 'deja {{ .Version }}'
+    # Note: no `skip_upload: auto`. Every canary tag is a prerelease, so `auto`
+    # would mean the tap is never updated.
+
+    # GoReleaser renders this into the per-platform `define_method(:install)` it
+    # emits inside `on_macos`/`on_linux` — there is no top-level `def install`
+    # to override, so both install modes have to be branched here.
+    install: |
+      if build.head?
+        revision = Utils.git_head(safe: true) || "unknown"
+        revision = revision[0, 7]
+
+        ldflags = %W[
+          -s -w
+          -X main.version=canary-#{revision}
+          -X main.commit=#{revision}
+          -X main.date=#{time.iso8601}
+        ]
+
+        # CGO is required: the SQLite driver is mattn/go-sqlite3.
+        ENV["CGO_ENABLED"] = "1"
+        system "go", "build", *std_go_args(ldflags: ldflags), "./cmd/deja"
+      else
+        bin.install "deja"
+      end
+
+    # Everything GoReleaser has no field for. `conflicts_with` is here rather
+    # than in `conflicts:` so the `because:` reasons survive.
+    custom_block: |
+      # Both install a `deja` binary into the same prefix. They also share
+      # ~/.local/share/deja, and deja bakes the absolute path of the binary that
+      # generated init.zsh into it, so two installed copies would each see the
+      # other's stamp as stale and regenerate the script on every shell.
+      conflicts_with "giammarco-ferranti/deja/deja", because: "both install a `deja` binary"
+
+      # Retained so `brew install --HEAD` still builds the tip of canary, ahead
+      # of whatever the last canary release was:
+      #
+      #   brew install --HEAD serubin/formula/deja
+      #   brew upgrade --fetch-HEAD serubin/formula/deja
+      #
+      # Go is a build dependency of that path only — the default install is a
+      # prebuilt binary.
+      head do
+        url "https://github.com/Serubin/deja.git", branch: "canary"
+        depends_on "go" => :build
+      end
+
+    caveats: |
+      This is the canary build — a prebuilt binary from the tip of the `canary`
+      branch as of {{ .Version }}, ahead of the released `deja`. Use
+      `brew install --HEAD serubin/formula/deja` to build the branch tip
+      from source instead.
+
+      It shares ~/.local/share/deja with the upstream `deja` formula, including
+      the history database, so switching between them keeps your history.
+
+      Import your existing zsh history once:
+
+        deja import
+
+      Then add this to your ~/.zshrc:
+
+        if [[ -r "$HOME/.local/share/deja/init.zsh" ]]; then
+          source "$HOME/.local/share/deja/init.zsh"
+        else
+          eval "$(deja init zsh)"
+        fi
+
+      The daemon outlives shell sessions, so after installing or upgrading,
+      replace the running one:
+
+        deja daemon --restart
+
+    test: |
+      assert_match "deja", shell_output("#{bin}/deja version")
+
+      # An end-to-end exercise of the real paths: import a history file, then
+      # ask for a suggestion. This runs with the daemon down, so it covers the
+      # direct SQLite fallback rather than just argument parsing.
+      ENV["HOME"] = testpath
+      (testpath/"history").write <<~EOS
+        : 1700000001:0;git status
+        : 1700000002:0;git commit --amend
+      EOS
+
+      system bin/"deja", "import", "--file", testpath/"history"
+      assert_match "git commit --amend",
+        shell_output("#{bin}/deja query --buffer 'git com' --dir #{testpath}")
+
+      # Canary carries the zsh/net/socket transport, so the generated
+      # integration script must contain the socket path substitution and the
+      # zsocket probe.
+      system bin/"deja", "init", "zsh"
+      init_script = testpath/".local/share/deja/init.zsh"
+      assert_path_exists init_script
+      assert_match "zsocket", init_script.read
+      # No unsubstituted placeholders left in the script. Spelled as an escaped
+      # regex because GoReleaser runs the assembled formula through its template
+      # engine, which would try to interpret a literal brace pair here.
+      refute_match(/\{\{/, init_script.read)
