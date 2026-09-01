@@ -6,7 +6,7 @@
 # .github/workflows/canary-release.yml: every commit on `canary` is tagged
 # `<next-patch>-canary.<run>` (no `v` prefix, so upstream's tag-triggered
 # workflow stays out of it) and published as a prerelease in Serubin/deja, then
-# the `deja-canary` formula in Serubin/homebrew-tools is regenerated to point at
+# the `deja` formula in Serubin/homebrew-formula is regenerated to point at
 # those binaries.
 #
 # `builds`, `archives`, and `checksum` are duplicated from `.goreleaser.yaml` on
@@ -98,19 +98,19 @@ release:
   replace_existing_artifacts: true
 
 brews:
-  - name: deja-canary
+  - name: deja
     ids:
       - default
     repository:
       owner: Serubin
-      name: homebrew-tools
+      name: homebrew-formula
       token: '{{ .Env.TAP_GITHUB_TOKEN }}'
     directory: Formula
     homepage: https://github.com/Serubin/deja
     # No trailing full stop: `brew style` flags it.
-    description: Predictive inline shell autosuggestions for zsh (canary branch)
+    description: Predictive inline shell autosuggestions for zsh (canary builds)
     license: MIT
-    commit_msg_template: 'deja-canary {{ .Version }}'
+    commit_msg_template: 'deja {{ .Version }}'
     # Note: no `skip_upload: auto`. Every canary tag is a prerelease, so `auto`
     # would mean the tap is never updated.
 
@@ -131,9 +131,7 @@ brews:
 
         # CGO is required: the SQLite driver is mattn/go-sqlite3.
         ENV["CGO_ENABLED"] = "1"
-        # output: is explicit because std_go_args names the binary after the
-        # formula, which would install `deja-canary`. The command is `deja`.
-        system "go", "build", *std_go_args(ldflags: ldflags, output: bin/"deja"), "./cmd/deja"
+        system "go", "build", *std_go_args(ldflags: ldflags), "./cmd/deja"
       else
         bin.install "deja"
       end
@@ -141,18 +139,17 @@ brews:
     # Everything GoReleaser has no field for. `conflicts_with` is here rather
     # than in `conflicts:` so the `because:` reasons survive.
     custom_block: |
-      # All three install a `deja` binary into the same prefix. They also share
+      # Both install a `deja` binary into the same prefix. They also share
       # ~/.local/share/deja, and deja bakes the absolute path of the binary that
       # generated init.zsh into it, so two installed copies would each see the
       # other's stamp as stale and regenerate the script on every shell.
-      conflicts_with "deja-main", because: "both install a `deja` binary"
       conflicts_with "giammarco-ferranti/deja/deja", because: "both install a `deja` binary"
 
       # Retained so `brew install --HEAD` still builds the tip of canary, ahead
       # of whatever the last canary release was:
       #
-      #   brew install --HEAD serubin/tools/deja-canary
-      #   brew upgrade --fetch-HEAD serubin/tools/deja-canary
+      #   brew install --HEAD serubin/formula/deja
+      #   brew upgrade --fetch-HEAD serubin/formula/deja
       #
       # Go is a build dependency of that path only — the default install is a
       # prebuilt binary.
@@ -164,11 +161,11 @@ brews:
     caveats: |
       This is the canary build — a prebuilt binary from the tip of the `canary`
       branch as of {{ .Version }}, ahead of the released `deja`. Use
-      `brew install --HEAD serubin/tools/deja-canary` to build the branch tip
+      `brew install --HEAD serubin/formula/deja` to build the branch tip
       from source instead.
 
-      It shares ~/.local/share/deja with the other deja formulae, including the
-      history database, so switching between them keeps your history.
+      It shares ~/.local/share/deja with the upstream `deja` formula, including
+      the history database, so switching between them keeps your history.
 
       Import your existing zsh history once:
 
