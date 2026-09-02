@@ -6,7 +6,7 @@
 # .github/workflows/canary-release.yml: every commit on `canary` is tagged
 # `<next-patch>-canary.<run>` (no `v` prefix, so upstream's tag-triggered
 # workflow stays out of it) and published as a prerelease in Serubin/deja, then
-# the `deja` formula in Serubin/homebrew-formula is regenerated to point at
+# the `deja` formula in Serubin/homebrew-tap is regenerated to point at
 # those binaries.
 #
 # `builds`, `archives`, and `checksum` are duplicated from `.goreleaser.yaml` on
@@ -103,7 +103,7 @@ brews:
       - default
     repository:
       owner: Serubin
-      name: homebrew-formula
+      name: homebrew-tap
       token: '{{ .Env.TAP_GITHUB_TOKEN }}'
     directory: Formula
     homepage: https://github.com/Serubin/deja
@@ -148,8 +148,8 @@ brews:
       # Retained so `brew install --HEAD` still builds the tip of canary, ahead
       # of whatever the last canary release was:
       #
-      #   brew install --HEAD serubin/formula/deja
-      #   brew upgrade --fetch-HEAD serubin/formula/deja
+      #   brew install --HEAD serubin/tap/deja
+      #   brew upgrade --fetch-HEAD serubin/tap/deja
       #
       # Go is a build dependency of that path only — the default install is a
       # prebuilt binary.
@@ -161,7 +161,7 @@ brews:
     caveats: |
       This is the canary build — a prebuilt binary from the tip of the `canary`
       branch as of {{ .Version }}, ahead of the released `deja`. Use
-      `brew install --HEAD serubin/formula/deja` to build the branch tip
+      `brew install --HEAD serubin/tap/deja` to build the branch tip
       from source instead.
 
       It shares ~/.local/share/deja with the upstream `deja` formula, including
