@@ -2,7 +2,7 @@ name: canary-release
 
 # Continuous releases for the fork's `canary` branch: every commit that passes
 # the test suite is tagged, published as a prerelease in Serubin/deja, and
-# pushed to the `deja` formula in Serubin/homebrew-formula. See
+# pushed to the `deja` formula in Serubin/homebrew-tap. See
 # .goreleaser.canary.yaml. This file lives on `canary` only — `main` stays a
 # mirror of upstream, which owns the `v*` release train.
 
@@ -42,7 +42,7 @@ jobs:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
           if [ -z "${TAP_GITHUB_TOKEN}" ]; then
-            echo "::error::TAP_GITHUB_TOKEN is unset. Create a fine-grained PAT with contents:write on Serubin/homebrew-formula and run: gh secret set TAP_GITHUB_TOKEN --repo Serubin/deja"
+            echo "::error::TAP_GITHUB_TOKEN is unset. Create a fine-grained PAT with contents:write on Serubin/homebrew-tap and run: gh secret set TAP_GITHUB_TOKEN --repo Serubin/deja"
             exit 1
           fi
 
@@ -93,6 +93,6 @@ jobs:
             release --clean -f .goreleaser.canary.yaml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Fine-grained PAT with contents:write on Serubin/homebrew-formula —
+          # Fine-grained PAT with contents:write on Serubin/homebrew-tap —
           # GITHUB_TOKEN cannot reach another repository.
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
